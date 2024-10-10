@@ -1333,16 +1333,12 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Check if either the source is encrypted or the destination will be encrypted.
-	objectEncryption := crypto.Requested(r.Header)
-	objectEncryption = objectEncryption || crypto.IsSourceEncrypted(srcInfo.UserDefined)
-
 	var compressMetadata map[string]string
 	// No need to compress for remote etcd calls
 	// Pass the decompressed stream to such calls.
 	isDstCompressed := isCompressible(r.Header, dstObject) &&
 		length > minCompressibleSize &&
-		!isRemoteCopyRequired(ctx, srcBucket, dstBucket, objectAPI) && !objectEncryption
+		!isRemoteCopyRequired(ctx, srcBucket, dstBucket, objectAPI)
 	if isDstCompressed {
 		compressMetadata = make(map[string]string, 2)
 		// Preserving the compression metadata.
@@ -1526,7 +1522,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 			if !srcTimestamp.IsZero() {
 				ondiskTimestamp, err := time.Parse(time.RFC3339Nano, lastTaggingTimestamp)
 				// update tagging metadata only if replica  timestamp is newer than what's on disk
-				if err != nil || (err == nil && ondiskTimestamp.Before(srcTimestamp)) {
+				if err != nil || (err == nil && !ondiskTimestamp.After(srcTimestamp)) {
 					srcInfo.UserDefined[ReservedMetadataPrefixLower+TaggingTimestamp] = srcTimestamp.UTC().Format(time.RFC3339Nano)
 					srcInfo.UserDefined[xhttp.AmzObjectTagging] = objTags
 				}
@@ -1625,7 +1621,10 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	// if encryption is enabled we do not need explicit "REPLACE" metadata to
 	// be enabled as well - this is to allow for key-rotation.
 	if !isDirectiveReplace(r.Header.Get(xhttp.AmzMetadataDirective)) && !isDirectiveReplace(r.Header.Get(xhttp.AmzTagDirective)) &&
-		srcInfo.metadataOnly && srcOpts.VersionID == "" && !objectEncryption {
+		srcInfo.metadataOnly && srcOpts.VersionID == "" &&
+		!crypto.Requested(r.Header) &&
+		!crypto.IsSourceEncrypted(srcInfo.UserDefined) {
+
 		// If x-amz-metadata-directive is not set to REPLACE then we need
 		// to error out if source and destination are same.
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidCopyDest), r.URL)
@@ -1961,6 +1960,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 	opts.IndexCB = idxCb
+	opts.WantChecksum = hashReader.Checksum()
 
 	if opts.PreserveETag != "" ||
 		r.Header.Get(xhttp.IfMatch) != "" ||

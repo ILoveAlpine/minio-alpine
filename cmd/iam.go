@@ -1294,10 +1294,6 @@ func (sys *IAMSys) GetClaimsForSvcAcc(ctx context.Context, accessKey string) (ma
 		return nil, errServerNotInitialized
 	}
 
-	if sys.usersSysType != LDAPUsersSysType {
-		return nil, nil
-	}
-
 	sa, ok := sys.store.GetUser(accessKey)
 	if !ok || !sa.Credentials.IsServiceAccount() {
 		return nil, errNoSuchServiceAccount
@@ -1568,16 +1564,16 @@ func (sys *IAMSys) updateGroupMembershipsForLDAP(ctx context.Context) {
 // accounts) for LDAP users. This normalizes the parent user and the group names
 // whenever the parent user parses validly as a DN.
 func (sys *IAMSys) NormalizeLDAPAccessKeypairs(ctx context.Context, accessKeyMap map[string]madmin.SRSvcAccCreate,
-) (err error) {
+) (skippedAccessKeys []string, err error) {
 	conn, err := sys.LDAPConfig.LDAP.Connect()
 	if err != nil {
-		return err
+		return skippedAccessKeys, err
 	}
 	defer conn.Close()
 
 	// Bind to the lookup user account
 	if err = sys.LDAPConfig.LDAP.LookupBind(conn); err != nil {
-		return err
+		return skippedAccessKeys, err
 	}
 
 	var collectedErrors []error
@@ -1602,8 +1598,7 @@ func (sys *IAMSys) NormalizeLDAPAccessKeypairs(ctx context.Context, accessKeyMap
 			continue
 		}
 		if validatedParent == nil || !isUnderBaseDN {
-			err := fmt.Errorf("DN parent was not found in the LDAP directory")
-			collectedErrors = append(collectedErrors, err)
+			skippedAccessKeys = append(skippedAccessKeys, ak)
 			continue
 		}
 
@@ -1621,8 +1616,7 @@ func (sys *IAMSys) NormalizeLDAPAccessKeypairs(ctx context.Context, accessKeyMap
 				continue
 			}
 			if validatedGroup == nil {
-				err := fmt.Errorf("DN group was not found in the LDAP directory")
-				collectedErrors = append(collectedErrors, err)
+				// DN group was not found in the LDAP directory for access-key
 				continue
 			}
 
@@ -1643,7 +1637,7 @@ func (sys *IAMSys) NormalizeLDAPAccessKeypairs(ctx context.Context, accessKeyMap
 
 	// if there are any errors, return a collected error.
 	if len(collectedErrors) > 0 {
-		return fmt.Errorf("errors validating LDAP DN: %w", errors.Join(collectedErrors...))
+		return skippedAccessKeys, fmt.Errorf("errors validating LDAP DN: %w", errors.Join(collectedErrors...))
 	}
 
 	for k, v := range updatedKeysMap {
@@ -1651,7 +1645,7 @@ func (sys *IAMSys) NormalizeLDAPAccessKeypairs(ctx context.Context, accessKeyMap
 		accessKeyMap[k] = v
 	}
 
-	return nil
+	return skippedAccessKeys, nil
 }
 
 func (sys *IAMSys) getStoredLDAPPolicyMappingKeys(ctx context.Context, isGroup bool) set.StringSet {
@@ -1677,16 +1671,16 @@ func (sys *IAMSys) getStoredLDAPPolicyMappingKeys(ctx context.Context, isGroup b
 // normalized form.
 func (sys *IAMSys) NormalizeLDAPMappingImport(ctx context.Context, isGroup bool,
 	policyMap map[string]MappedPolicy,
-) error {
+) ([]string, error) {
 	conn, err := sys.LDAPConfig.LDAP.Connect()
 	if err != nil {
-		return err
+		return []string{}, err
 	}
 	defer conn.Close()
 
 	// Bind to the lookup user account
 	if err = sys.LDAPConfig.LDAP.LookupBind(conn); err != nil {
-		return err
+		return []string{}, err
 	}
 
 	// We map keys that correspond to LDAP DNs and validate that they exist in
@@ -1699,6 +1693,7 @@ func (sys *IAMSys) NormalizeLDAPMappingImport(ctx context.Context, isGroup bool,
 	// map of normalized DN keys to original keys.
 	normalizedDNKeysMap := make(map[string][]string)
 	var collectedErrors []error
+	var skipped []string
 	for k := range policyMap {
 		_, err := ldap.NormalizeDN(k)
 		if err != nil {
@@ -1711,8 +1706,7 @@ func (sys *IAMSys) NormalizeLDAPMappingImport(ctx context.Context, isGroup bool,
 			continue
 		}
 		if validatedDN == nil || !underBaseDN {
-			err := fmt.Errorf("DN was not found in the LDAP directory")
-			collectedErrors = append(collectedErrors, err)
+			skipped = append(skipped, k)
 			continue
 		}
 
@@ -1723,7 +1717,7 @@ func (sys *IAMSys) NormalizeLDAPMappingImport(ctx context.Context, isGroup bool,
 
 	// if there are any errors, return a collected error.
 	if len(collectedErrors) > 0 {
-		return fmt.Errorf("errors validating LDAP DN: %w", errors.Join(collectedErrors...))
+		return []string{}, fmt.Errorf("errors validating LDAP DN: %w", errors.Join(collectedErrors...))
 	}
 
 	entityKeysInStorage := sys.getStoredLDAPPolicyMappingKeys(ctx, isGroup)
@@ -1744,7 +1738,7 @@ func (sys *IAMSys) NormalizeLDAPMappingImport(ctx context.Context, isGroup bool,
 			}
 
 			if policiesDiffer {
-				return fmt.Errorf("multiple DNs map to the same LDAP DN[%s]: %v; please remove DNs that are not needed",
+				return []string{}, fmt.Errorf("multiple DNs map to the same LDAP DN[%s]: %v; please remove DNs that are not needed",
 					normKey, origKeys)
 			}
 
@@ -1788,7 +1782,7 @@ func (sys *IAMSys) NormalizeLDAPMappingImport(ctx context.Context, isGroup bool,
 			}
 		}
 	}
-	return nil
+	return skipped, nil
 }
 
 // CheckKey validates the incoming accessKey
@@ -2181,7 +2175,6 @@ func (sys *IAMSys) IsAllowedServiceAccount(args policy.Args, parentUser string) 
 			return false
 		}
 		svcPolicies = newMappedPolicy(sys.rolesMap[arn]).toSlice()
-
 	default:
 		// Check policy for parent user of service account.
 		svcPolicies, err = sys.PolicyDBGet(parentUser, args.Groups...)

@@ -97,6 +97,14 @@ test-iam-ldap-upgrade-import: install-race ## verify IAM (external LDAP IDP)
 	@echo "Running upgrade tests for IAM (LDAP backend)"
 	@env bash $(PWD)/buildscripts/minio-iam-ldap-upgrade-import-test.sh
 
+test-iam-import-with-missing-entities: install-race ## test import of external iam config withg missing entities
+	@echo "Test IAM import configurations with missing entities"
+	@env bash $(PWD)/docs/distributed/iam-import-with-missing-entities.sh
+
+test-iam-import-with-openid: install-race
+	@echo "Test IAM import configurations with openid"
+	@env bash $(PWD)/docs/distributed/iam-import-with-openid.sh
+
 test-sio-error:
 	@(env bash $(PWD)/docs/bucket/replication/sio-error.sh)
 
@@ -132,6 +140,10 @@ test-site-replication-minio: install-race ## verify automatic site replication
 	@(env bash $(PWD)/docs/site-replication/run-sse-kms-object-replication.sh)
 	@echo "Running tests for automatic site replication of SSE-C objects with compression enabled for site"
 	@(env bash $(PWD)/docs/site-replication/run-ssec-object-replication-with-compression.sh)
+
+test-multipart: install-race ## test multipart
+	@echo "Test multipart behavior when part files are missing"
+	@(env bash $(PWD)/buildscripts/multipart-quorum-test.sh)
 
 verify: install-race ## verify minio various setups
 	@echo "Verifying build with race"
